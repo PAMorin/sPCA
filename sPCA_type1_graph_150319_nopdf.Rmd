@@ -490,7 +490,11 @@ levels(obj.s@other$popcol)[13] <- "royalblue"
 obj.s@other$popcol<-as.character(obj.s@other$popcol)
   
 # pdf(paste0(title,"_",stratum,"3D_plot.pdf"), width=6, height=6)
+
 PpALL.3d <- scatterplot3d(mySpca$ls[,1], mySpca$ls[,2], mySpca$ls[,3], color=obj.s@other$popcol, pch=19, xlab="Axis 1", ylab="Axis 2", zlab="Axis 3", type="h", angle=60, box=FALSE)
+legend(PpALL.3d$xyz.convert(-9, -5, 0), legend = levels(obj.s@other$pop), col = unique(obj.s@other$popcol), pch = 20, cex = 0.8) # change xyz.convert coordinates to re-position legend; can also use "right", "left", etc instead of xyz.convert positioning 
+# see http://www.sthda.com/english/wiki/scatterplot3d-3d-graphics-r-software-and-data-visualization#add-legends
+
 # dev.off()
 
 ```
