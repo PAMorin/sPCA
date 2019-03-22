@@ -1,0 +1,567 @@
+---
+title: "sPCA"
+author: "Phil Morin"
+date: "`r format(Sys.time(), '%d.%m.%Y')`"
+output:
+  word_document:
+    toc: yes
+    toc_depth: 3
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Spatial PCA (sPCA, package = adegenet) analysis for population structure from geo-referenced (latitude/longitude) samples and genetic data. Most of these steps are taken from the tutorial for sPCA (available at https://github.com/thibautjombart/adegenet). The Monte Carlo test for global and local structure is based on Montano and Jombart 2018, but the original global and local tests from Jombart et al. 2008 are also included. 
+
+Data and stratification (including coordinates) are imported as separate files and combined into a gtypes object (package = strataG). 
+
+Example files: 
+example_100_loci_genotable.csv
+Strata_example_Ppho.csv
+
+References:
+T Jombart, S Devillard, A-B Dufour and D Pontier (2008), Revealing cryptic spatial patterns in genetic variability by a new multivariate method. Heredity 101:92-103.
+
+V. Montano and T. Jombart (2017), An Eigenvalue test for spatial principal component analysis. BMC Bioinformatics 18:562 (DOI 10.1186/s12859-017-1988-y).
+
+NOTE: This Rmarkdown file can be knit to html, but not to pdf or MS Word. I encounters fatal errors when knitting to those file types, but all of the script blocks run in Rstudio.
+
+# Load packages
+```{r echo=TRUE, results='hide', message=FALSE, warning=FALSE} 
+rm(list = ls())
+
+library(adegenet)
+library(strataG)
+library(spdep)
+library(tidyverse)
+library(gtools)
+library(PBSmapping)
+library(maps)
+library(ggplot2)
+library(rworldmap)
+library(swfscMisc)
+library(fields)
+library(RColorBrewer)
+library(mapplots)
+library(marmap)
+library(raster)
+
+paste("working directory is:")
+getwd()
+```
+
+
+# Load and format data from csv files for genotypes and stratification schemes
+(for gtypes object used by strataG package), and remove monomorphic loci for specified strata.
+```{r}
+    
+stratum <- "Wcoast4_num" #corrected to reflect AK_STRATA_3 and Wcoast4_num (several samples removed compared to Num_AK3_WC4)
+title <- "sPCA"
+#dir.create(paste(title,"_",stratum, sep = ""))
+
+# read genotypes data file (diploid, codominant); in directory above current directory
+# Format = 1st column = labid, 2 columns per locus
+gdata <- read.csv("example_100_loci_genotable.csv", header = TRUE) 
+#sample id column = 'labid', missing data as NA, 00, 000, -999
+
+# read stratification file (includes lat/lon coordinates)
+# in directory above current directory
+# required columns for labid, Latitude, Longitude. After that, each column is a stratification scheme with 
+#  strata names for each sample in the strata.
+coord <- read.csv("Strata_example_Ppho.csv", header = TRUE, na.strings=c("","NA"))
+# change labid column header name
+colnames(coord)[colnames(coord) == "LABID"] <- "labid"
+
+# combine data with coordinates (files can be different lengths)
+# select the specified stratum along with labid, Latitude and Longitude from the strata file
+strata.df.names <- c("labid", "Latitude", "Longitude", stratum)
+coord.strat <- coord[,colnames(coord) %in% strata.df.names]
+# then merge dataframes based on "labid" being a column name in both dataframes
+data <- merge(coord.strat,gdata)
+# remove sample data if not included in the specified strata
+data2 <- data %>% drop_na(stratum)
+# remove sample data if it doesn't have lat/lon
+data2 <- data2 %>% drop_na(Latitude)
+# Remove monomorphic loci then ane write a file of monomorphic loci for this stratification scheme.
+other<-data2 %>% dplyr::select(labid, Latitude, Longitude) #create dataframe to add Lat/Lon to gtypes object (labid, Latitude, Longitude)
+g <- df2gtypes(data2, #this creates a df with 2 columns for id and hap
+               ploidy = 2,
+               id.col = 1,
+               strata.col = 4,
+               loc.col = 5,
+               other = other,
+               description = title)
+alleleNum<-numAlleles(g)
+not.mono <- names(alleleNum)[alleleNum > 1]
+not.mono.g <- g[, not.mono, ]
+not.mono.df <- as.data.frame(not.mono.g)
+not.mono.df$labid<-not.mono.df$ids
+not.mono.df$ids<-NULL
+# Add the lat/lon data back to the dataframe
+data3<-merge(not.mono.df,other)
+# re-order the dataframe to put Lat/Lon columns after labid's
+latlon <- c("labid", "Latitude", "Longitude")
+data3 <- data3[, c(latlon, setdiff(names(data3), latlon))]
+data3 <- data3 %>% arrange(strata, labid) # sort by strata column (ascending)
+
+# save list of monomorphic loci to a .csv file
+mono<-alleleNum < 2
+monoloc<-names(mono) [which(mono==TRUE)]
+write.csv(monoloc, paste0(stratum,"_monomorphic_loci.csv"))
+cat("there were", length(monoloc), "monomorphic loci, saved to file:", paste0(stratum,"_monomorphic_loci.csv"))
+
+#save summary of data (after excluding monomorphic loci)
+data_sum <- summary(not.mono.g)
+strata.df <- as.data.frame(data_sum$strata.smry)
+loc.df <- as.data.frame(data_sum$locus.smry)
+samp.df <- as.data.frame(data_sum$sample.smry)
+write.csv(strata.df, paste0(title,"_",stratum,"_data_sum.csv"))
+write.csv(loc.df, paste0(title,"_",stratum,"_loc_sum.csv"))
+write.csv(samp.df, paste0(title,"_",stratum,"_sample_sum.csv"))
+
+paste("number of individuals = ", data_sum$num.ind)
+paste("number of loci = ", data_sum$num.loc)
+
+# set the modified data file as the default database in R search path
+attach(data3) 
+
+data3[1:10,1:10]
+```
+
+# Map the data points
+```{r echo=FALSE, fig.height=8, fig.width=8}
+library(swfscMisc)
+#pdf(file=paste0(title,"_",stratum,"_sample_map.pdf"))
+sample2.map<-function (lat, lon, lat.range, lon.range, main = NULL, 
+                       pch = 19, pt.cex = 1, col = "black", bg = col, 
+                       n = 5, lon.n = n, lat.n = n) 
+{
+  has.loc <- !is.na(lon) & !is.na(lat)
+  in.lon.range <- lon >= min(lon.range) & lon <= max(lon.range)
+  in.lat.range <- lat >= min(lat.range) & lat <= max(lat.range)
+  to.plot <- has.loc & in.lon.range & in.lat.range
+  if (!is.null(main)) 
+    main <- paste(main, " (n = ", sum(to.plot), ")", sep = "")
+  if (length(pch) == length(lon)) 
+    pch <- pch[to.plot]
+  if (length(pt.cex) == length(lon)) 
+    pt.cex <- pt.cex[to.plot]
+  if (length(col) == length(lon)) 
+    col <- col[to.plot]
+  op <- par(mar = c(3, 5, ifelse(is.null(main), 3, 5), 5) + 
+              0.1, oma = c(1, 1, 1, 1))
+  maps::map("world2Hires", xlim = lon.range, 
+      ylim = lat.range, boundary = TRUE, myborder = 0.1)
+  points(lon[to.plot], lat[to.plot], pch = pch, cex = pt.cex, 
+         col = col, bg = bg)
+  #lat.lon.axes(lon.range, lat.range, n = n, lon.n = lon.n, 
+  #             lat.n = lat.n)
+  if (!is.null(main)) 
+    mtext(main, line = 3, cex = 1.5)
+  box(lwd = 2)
+  #invisible(op)
+}
+
+#pop_number <- #list of numbers, 1 to the total number of populations in the strata
+  # build a color list for the number of populations in this stratification scheme
+
+# add a column for 360 degree mapping
+Lon360 <- ifelse(data3$Longitude < 0, 360 + data3$Longitude, data3$Longitude)
+data3_Lon360 <- cbind(data3, Lon360)
+lat_min <- min(data3_Lon360$Latitude)
+lat_max <- max(data3_Lon360$Latitude)
+lon_min <- min(data3_Lon360$Lon360)
+lon_max <- max(data3_Lon360$Lon360)
+    
+lat.range <- c(lat_min - 1, lat_max + 0.5)
+lon.range <- c(lon_min - 1.5, lon_max + 0)
+n<-5
+
+# NOT USED: could develop to select colors based on number of strata and apply to the map.
+#type.col <- "red" 
+#type.pch <- 21
+#create named vectors where the names match the values in the "type" column of 
+#the input data file, and each type is assigned a color and shape.
+#sample2.map(data3_Lon360$Latitude, data3_Lon360$Lon360, lat.range, lon.range, n = n, 
+#           bg = type.col[data3_Lon360$strata], pch = type.pch[data3_Lon360$strata])
+
+sample2.map(data3_Lon360$Latitude, data3_Lon360$Lon360, lat.range, lon.range, n = n, 
+           bg = "black", col = "blue")
+#dev.off()
+```
+
+# Format data to genind object for adegenet
+(see tutorials at https://github.com/thibautjombart/adegenet)
+```{r}
+# first convert gtypes to genind
+genot <- data3[5:ncol(data3)]
+dim(genot)
+loc<-ncol(genot) # counts the number of columns (alleles)
+
+allele <- sapply(genot, levels)
+
+#List of Alleles 1
+Ai <- seq(1,loc-1,2); length(Ai)
+#List of Alleles 2
+Aj <- seq(2,loc,2); length(Aj)
+
+# Nb loci
+nloc <- length(Ai)
+
+# Empty matrix
+SNPdata <- matrix(ncol=length(genot)/2, nrow=nrow(genot))
+
+# Loop to assamble A1 and A2 of each loci into combined alleles in single column
+for (i in c(1:nloc)){
+  #i=1
+  SNP <- paste(genot[,Ai[i]], genot[,Aj[i]], sep="/")
+  SNPdata[,i] <- SNP
+}
+
+# Note SNPdata have lost the loc.names. We can restore that as follow
+my.colnames <- names(genot)[Ai]
+my.new.colnames <- gsub(".1$","", names(genot)[Ai], perl=TRUE)
+colnames(SNPdata) <- my.new.colnames #gsub(".1$","", names(genot)[Ai], perl=TRUE)
+rownames(SNPdata) <- data3$labid
+SNPdata1 <- cbind(labid = rownames(SNPdata), SNPdata)
+SNPdata[c(1:10), (1:10)]
+
+obj<-df2genind(X=SNPdata, ind.names=data3$labid, pop=data3$strata, ploidy=2, sep="/", NA.char = "NA")
+genind.summary <- summary(obj)
+###obj$other$xy <-cbind(data3$Longitude,data3$Latitude) #for data that cross the international date line, change Longitude to Lon360 (and provide converted data column)
+
+# pdf(file=paste0(title,"_",stratum,"_Sample_sizes.pdf"), width = 5, height = 5, paper = "letter", pointsize = 8)
+obj$other$xy <-cbind(data3_Lon360$Lon360, data3_Lon360$Latitude)
+is.genind(obj)
+
+obj
+barplot(table(pop(obj)), col=funky(17), las=3,
+ylab="Sample size", cex.names=0.4) # xlab="Population", 
+# dev.off()
+
+# create genpop object from genind:
+genpop <- genind2genpop(obj)
+
+```
+
+
+
+
+# sPCA
+```{r message=FALSE, cache=TRUE}
+obj.s<-obj
+obj.s$other$xy<-jitter(obj$other$xy, factor = 1) # LL used amount = 100 for 100 meters on UTM coordinates in meters.
+
+mySpca <- spca(obj.s, ask=T, type=1, scannf=F, nfposi = 3, nfnega = 0, scale=T) # method used by LL
+
+
+#mySpca <- spca(obj, type=5,d1=0,d2=2,scannf=FALSE, nfposi = 5, nfnega = 2) #, nfposi = 3, nfnega = 0
+#mySpca <- spca(genpop, type=5,d1=0,d2=2,scannf=FALSE)
+# computes a sPCA using a connection network which denes neighbouring entities based on pairwise geographic distances (type=5), considering as neighbours two entities whose distance between 0 (d1=0) and 2 (d2=2) (see tutorial-spca from adgenet github page)
+# scannf=TRUE spca displays a barplot of eigenvalues and asks the user for a number of positive axes ('rst number of axes') and negative axes ('second number of axes') to be retained.
+
+# pdf(file=paste0(title,"_",stratum,"_Eigen_values.pdf"))
+
+#  sample2.map(data3_Lon360$Latitude, data3_Lon360$Lon360, lat.range, lon.range, n = n, 
+#           bg = "black", col = "blue")
+#  colorplot(mySpca, cex=2, axes=1:3, main="colorplot sPCA", add.plot=TRUE) # axes=1:ncol(x$li), 
+
+barplot(mySpca$eig, main="sPCA eigenvalues",
+col=spectral(length(mySpca$eig)))
+legend("topright", fill=spectral(2),
+leg=c("Global structures", "Local structures"))
+abline(h=0,col="grey")
+# Positive eigenvalues (on the left) correspond to global structures, while negative eigenvalues (on the right) indicate local patterns.
+# dev.off()
+```
+
+
+# Spatial and variance components of the eigenvalues 
+(tutorial p. 13-14)
+The resulting figure represents eigenvalues of sPCA (denoted lambda-i with i = 1,...,r, where lambda-1
+is the highest positive eigenvalue, and lambda-r is the highest negative eigenvalue.
+
+This figure is useful to assess whether a given score
+of entities contains relatively enough variability and spatial structuring to be interpreted.
+For instance, int the tutorial example, lambda-1 clearly is the largest eigenvalue in terms of variance and of spatial
+autocorrelation, and can be well distinguished from all the other eigenvalues. Hence, only
+the first global structure, associated to lambda-1, should be interpreted.
+```{r message=FALSE, cache=TRUE}
+# pdf(file=paste0(title,"_",stratum,"_screeplot.pdf"))
+screeplot(mySpca)
+# dev.off()
+```
+
+# Global test
+If the alternative hypothesis is "greater", a p-value is estimated as: (number of random values equal to or greater than the observed one + 1)/(number of permutations + 1). The null hypothesis is rejected if the p-value is less than the significance level. If the alternative hypothesis is "less", a p-value is estimated as: (number of random values equal to or less than the observed one + 1)/(number of permutations + 1). Again, the null hypothesis is rejected if the p-value is less than the significance level. 
+
+```{r message=FALSE, cache=TRUE}
+
+# Need to replace "NA"s in the genind data table with 0s.
+obj.s@tab <- na.replace(obj.s@tab, 0, na.rm=TRUE)
+#obj1 <- tab(obj, NA.method="mean") # this converts missing data (NA's) to the mean value for the population
+
+myGtest <- global.rtest(obj.s$tab, mySpca$lw, nperm=999) # can start with 99 permutations to test
+myGtest
+a=paste0("observation = ",myGtest$obs)
+b=paste0("alternative hypothesis = ",myGtest$alter)
+c=paste0("based on ",myGtest$rep," replicates")
+d=paste0("simulated pvalue = ",myGtest$pvalue)
+
+
+# pdf(file=paste0(title,"_",stratum,"_Global_test.pdf"))
+plot(myGtest, main="Global Structure ALL")
+plot(NA, xlim=c(0,5), ylim=c(0,5), bty='n',
+     xaxt='n', yaxt='n', xlab='', ylab='')
+text(1,4,a, pos=4)
+text(1,3,b, pos=4)
+text(1,2,c, pos=4)
+text(1,1,d, pos=4)
+points(rep(1,4),1:4, pch=15)
+myGtest
+# dev.off()
+
+# The figure shows an histogram of permuted test statistics and indicates the observed statistics by a black dot and a segment. in the example (tutorial-spca.pdf), the plot clearly shows that the oberved test statistic is larger than most simulated values, leading to a likely rejection of the null hypothesis of absence of spatial structure.```
+```
+
+
+# Local test
+```{r message=FALSE, cache=TRUE}
+myLtest <- local.rtest(obj.s@tab,mySpca$lw, nperm = 999) #recommend 9999 permutations; test with 99
+myLtest
+a=paste0("observation = ",myLtest$obs)
+b=paste0("alternative hypothesis = ",myLtest$alter)
+c=paste0("based on ",myLtest$rep," replicates")
+d=paste0("simulated pvalue = ",myLtest$pvalue)
+
+# pdf(file=paste0(title,"_",stratum,"_Local_test.pdf"))
+plot(myLtest, main="Local Structure ALL")
+plot(NA, xlim=c(0,5), ylim=c(0,5), bty='n',
+     xaxt='n', yaxt='n', xlab='', ylab='')
+text(1,4,a, pos=4)
+text(1,3,b, pos=4)
+text(1,2,c, pos=4)
+text(1,1,d, pos=4)
+points(rep(1,4),1:4, pch=15)
+myLtest
+# dev.off()
+```
+
+# Monte Carlo test for presence of significant spatial structure in sPCA
+Montano and Jombart BMC Bioinformatics (2017) 18:562, DOI 10.1186/s12859-017-1988-y
+(https://github.com/thibautjombart/adegenet/blob/master/R/spca_randtest.R)
+"Results show that our test outperforms the original global and local tests, exhibiting improved statistical power while retaining similar, and reliable type I errors. Moreover, by allowing to test various sets of axes, it can be used to guide the selection of retained sPCA components."
+```{r message=FALSE, warning=FALSE, cache=TRUE}
+
+# run spca_randtest function. test number of permuations at low num (e.g., 40), then run with 999.
+randtest <- spca_randtest(mySpca, nperm = 999)
+a=paste0("global observation = ",randtest$global$obs)
+b=paste0("global alternative hypothesis = ",randtest$global$alter)
+c=paste0("global based on ",randtest$global$rep," replicates")
+d=paste0("global simulated pvalue = ",randtest$global$pvalue)
+e=paste0("local observation = ",randtest$local$obs)
+f=paste0("local alternative hypothesis = ",randtest$local$alter)
+g=paste0("local based on ",randtest$local$rep," replicates")
+h=paste0("local simulated pvalue = ",randtest$local$pvalue)
+
+
+# pdf(file=paste0(title,"_",stratum,"_randtest.pdf"))
+plot(randtest[[1]], main="Global Structure ALL") # global structures
+plot(NA, xlim=c(0,5), ylim=c(0,5), bty='n',
+     xaxt='n', yaxt='n', xlab='', ylab='')
+text(1,4,a, pos=4)
+text(1,3,b, pos=4)
+text(1,2,c, pos=4)
+text(1,1,d, pos=4)
+points(rep(1,4),1:4, pch=15)
+
+plot(randtest[[2]], main="Local Structure ALL") # global structures
+plot(NA, xlim=c(0,5), ylim=c(0,5), bty='n',
+     xaxt='n', yaxt='n', xlab='', ylab='')
+text(1,4,e, pos=4)
+text(1,3,f, pos=4)
+text(1,2,g, pos=4)
+text(1,1,h, pos=4)
+points(rep(1,4),1:4, pch=15)
+# dev.off()
+```
+
+# sPCA multi-plot
+```{r message=FALSE, cache=TRUE}
+
+# pdf(file=paste0(title,"_",stratum,"_sPCA_plots.pdf"))
+plot(mySpca, useLag=TRUE)
+# dev.off()
+
+```
+
+
+# Interpolate sPCA to identify clines
+```{r message=FALSE, cache=TRUE}
+library(akima)
+
+# pdf(file=paste0(title,"_",stratum,"_sPCA_interpolate.pdf"))
+
+# convert longitude to 360 in "other" object
+other$Longitude <- ifelse(other$Longitude < 0, 360 + other$Longitude, other$Longitude)
+x <- other(obj.s)$xy[,1]
+y <- other(obj.s)$xy[,2]
+
+interpX <- seq(min(x),max(x),le=200)
+interpY <- seq(min(y),max(y),le=200)
+temp <- akima::interp(x, y, mySpca$ls[,1], xo=interpX, yo=interpY, duplicate = "mean") #interpolates duplicate location data points as the mean.
+image(temp, col=azur(100))
+points(x,y)
+
+myPal <- colorRampPalette(c("firebrick2", "white", "lightslateblue"))
+annot <- function(){
+title("sPCA - interpolated map of individual scores")
+points(x,y)
+}
+filled.contour(temp, color.pal=myPal, nlev=50,
+key.title=title("lagged \nscore 1"), plot.title=annot(), add.plot=TRUE)
+
+# dev.off()
+```
+
+# Which alleles exhibit structure (squared loading)
+```{r message=FALSE, cache=TRUE}
+# pdf(file=paste0(title,"_",stratum,"sPCA_allele_contributions.pdf"), width = 10, height = 5, paper = "USr")
+myLoadings <- mySpca$c1[,1]^2
+names(myLoadings) <- rownames(mySpca$c1)
+loadingplot(myLoadings, xlab="Alleles",
+ylab="Weight of the alleles",
+main="Contribution of alleles \n to the first sPCA axis")
+
+# AVERAGE CONTRIBUTION OF EACH MARKER, BOXPLOT
+
+boxplot(myLoadings~obj.s$loc.fac, las=3, ylab="Contribution", xlab="Marker",
+main="Contributions by markers \nto the first global score", col="grey")
+
+# dev.off()
+# threshold value above which alleles are annotated.
+
+```
+
+# sPCA non-spatial plots
+
+```{r}
+# pdf(paste0("SPCA.ax1-2_", stratum,".pdf"), width=6, height=6)
+s.class(mySpca$ls, pop(obj.s), xax = 1, yax = 2, grid=FALSE, sub = paste0("SPCA: ", stratum, " ax1-ax2"), possub = "topright")
+add.scatter.eig(mySpca$eig, 2,1,2, posi="topleft")
+# dev.off()
+
+# pdf(paste0("SPCA.ax1-3_", stratum,".pdf"), width=6, height=6)
+s.class(mySpca$ls, pop(obj.s), xax = 1, yax = 3, grid=FALSE, sub = paste0("SPCA: ", stratum, " ax1-ax3"), possub = "topright")
+add.scatter.eig(mySpca$eig, 2,1,3, posi="topleft")
+# dev.off()
+
+# pdf(paste0("SPCA.ax2-3_", stratum,".pdf"), width=6, height=6)
+s.class(mySpca$ls, pop(obj.s), xax = 2, yax = 3, grid=FALSE, sub = paste0("SPCA: ", stratum, " ax2-ax3"), possub = "topright")
+add.scatter.eig(mySpca$eig, 2,2,3, posi="topleft")
+# dev.off()
+
+```
+
+# 3D PC plots (non-spatial)
+```{r}
+# Using scatterplot3d
+library(scatterplot3d)
+
+# here each population get's it's own color (based on 8 populations)
+
+levels(obj.s@pop) # use this to list the populations, then assign colors to each
+obj.s@other$pop<-obj.s@pop
+obj.s@other$popcol<-obj.s@other$pop
+
+levels(obj.s@other$popcol)[1] <- "red"
+levels(obj.s@other$popcol)[2] <- "darkorange1"
+levels(obj.s@other$popcol)[3] <- "yellow"
+levels(obj.s@other$popcol)[4] <- "green"
+levels(obj.s@other$popcol)[5] <- "blue"
+levels(obj.s@other$popcol)[6] <- "darkolivegreen"
+levels(obj.s@other$popcol)[7] <- "skyblue"
+levels(obj.s@other$popcol)[8] <- "magenta"
+levels(obj.s@other$popcol)[9] <- "mediumturquoise"
+levels(obj.s@other$popcol)[10] <- "peachpuff"
+levels(obj.s@other$popcol)[11] <- "gray30"
+levels(obj.s@other$popcol)[12] <- "mediumorchid"
+levels(obj.s@other$popcol)[13] <- "royalblue"
+
+obj.s@other$popcol<-as.character(obj.s@other$popcol)
+  
+# pdf(paste0(title,"_",stratum,"3D_plot.pdf"), width=6, height=6)
+PpALL.3d <- scatterplot3d(mySpca$ls[,1], mySpca$ls[,2], mySpca$ls[,3], color=obj.s@other$popcol, pch=19, xlab="Axis 1", ylab="Axis 2", zlab="Axis 3", type="h", angle=60, box=FALSE)
+legend(PpALL.3d$xyz.convert(-9, -5, 0), legend = levels(obj.s@other$pop), col = unique(obj.s@other$popcol), pch = 20, cex = 0.8) # change xyz.convert coordinates to re-position legend; can also use "right", "left", etc instead of xyz.convert positioning 
+# see http://www.sthda.com/english/wiki/scatterplot3d-3d-graphics-r-software-and-data-visualization#add-legends
+
+# dev.off()
+
+```
+
+
+# Plot individual PC's
+```{r message=FALSE, cache=TRUE}
+
+# pdf(file=paste0(title,"_",stratum,"_PC1-3_plots.pdf"))
+
+# display the two rst components of the analysis. Kernel density estimation (s.kde2d) is used for a better assessment of the distribution of the genotypes onto the principal axes:
+s.label(mySpca$li, clabel = 0.5)
+s.kde2d(mySpca$li, add.p=TRUE, cpoint=0)
+add.scatter.eig(mySpca$eig,2,1,2, ratio = .35)
+
+
+# graphical representation of first 2 PC's (legend location is hard-coded)
+s.value(cbind(1:11,rep(1,11)), -5:5, cleg=0)
+text(1:11,rep(1,11), -5:5, col="red",cex=1.5)
+xy <- obj.s@other$xy
+# PC1
+#plot(xy)
+sample2.map(data3_Lon360$Latitude, data3_Lon360$Lon360, lat.range, lon.range, n = n, 
+           bg = "black", col = "black", pt.cex = 0.5)
+s.value(obj.s@other$xy, mySpca$ls[,1], add.p=TRUE, csize=1.5)
+title("sPCA - 1st PC",col.main="blue" ,line=1, cex.main=1)
+
+# PC2
+#plot(xy)
+sample2.map(data3_Lon360$Latitude, data3_Lon360$Lon360, lat.range, lon.range, n = n, 
+           bg = "black", col = "black", pt.cex = 0.5)
+s.value(obj.s@other$xy, mySpca$ls[,2], add.p=TRUE, csize=1.5, csub = 10)
+title("sPCA - 2nd PC",col.main="blue" ,line=1, cex.main=1)
+
+# PC3
+#plot(xy)
+sample2.map(data3_Lon360$Latitude, data3_Lon360$Lon360, lat.range, lon.range, n = n, 
+           bg = "black", col = "black", pt.cex = 0.5)
+s.value(obj.s@other$xy, mySpca$ls[,3], add.p=TRUE, csize=1.5, csub = 10)
+title("sPCA - 3rd PC",col.main="blue" ,line=1, cex.main=1)
+
+# PC4
+#plot(xy)
+#sample2.map(data3_Lon360$Latitude, data3_Lon360$Lon360, lat.range, lon.range, n = n, 
+#           bg = "black", col = "black", pt.cex = 0.5)
+#s.value(obj.s@other$xy, mySpca$ls[,4], add.p=TRUE, csize=0.5, csub = 10)
+#title("sPCA - 4th PC",col.main="blue" ,line=1, cex.main=1)
+
+
+# color plot of PC1-3
+#plot(xy)
+sample2.map(data3_Lon360$Latitude, data3_Lon360$Lon360, lat.range, lon.range, n = n, 
+           bg = "black", col = "black", pt.cex = 0.5)
+colorplot(obj.s$other$xy, mySpca$ls, axes=1:3, transp=FALSE, add=TRUE,
+cex=1.5) # axes=1:ncol(mySpca$li)
+title("sPCA - colorplot of PC 1 - 3\n(lagged scores)", col.main="blue",
+line=1, cex=1)
+# axes = up to 3 PC's to be used (can specify which ones; default = first 3 if not specified)
+
+
+# dev.off()
+```
+
+
+# Save data
+```{r cache=TRUE}
+save.image(file=paste0(title, "_", stratum, "_sPCA.Rdata"))
+```
+
